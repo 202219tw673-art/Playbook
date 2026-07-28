@@ -1,0 +1,92 @@
+---
+# ---------------------------------------------------------------------------
+# Playbook : monitoring.yml
+# Purpose  : Remotely collect CPU, memory, and disk utilization from each
+#            managed node (agentless - no software installed on nodes) and
+#            forward a consolidated report to the control node / AWX.
+# ---------------------------------------------------------------------------
+- name: Resource Monitoring - CPU / Memory / Disk
+  hosts: all
+  become: false
+  gather_facts: true
+
+  vars:
+    local_report_dir: "{{ monitoring_report_dir | default('/tmp/server_monitoring') }}"
+
+  tasks:
+
+    - name: Get CPU utilization snapshot (top, batch mode)
+      ansible.builtin.shell:
+        cmd: top -bn1 | grep "Cpu(s)"
+      register: cpu_usage
+      changed_when: false
+
+    - name: Get load average and uptime
+      ansible.builtin.command:
+        cmd: uptime
+      register: uptime_output
+      changed_when: false
+
+    - name: Get memory utilization
+      ansible.builtin.command:
+        cmd: free -m
+      register: mem_usage
+      changed_when: false
+
+    - name: Get disk utilization
+      ansible.builtin.command:
+        cmd: df -h
+      register: disk_usage
+      changed_when: false
+
+    - name: Parse root filesystem usage percentage
+      ansible.builtin.set_fact:
+        root_disk_pct: "{{ (disk_usage.stdout_lines | select('search', ' / $') | list | first).split()[-2] | replace('%','') | int }}"
+      when: disk_usage.stdout_lines | select('search', ' / $') | list | length > 0
+
+    - name: Flag disk usage warning if above threshold
+      ansible.builtin.debug:
+        msg: >
+          WARNING: {{ inventory_hostname }} root filesystem usage is
+          {{ root_disk_pct }}%, exceeding threshold of
+          {{ monitoring_disk_warning_threshold }}%.
+      when:
+        - root_disk_pct is defined
+        - root_disk_pct | int > monitoring_disk_warning_threshold | int
+
+    - name: Build consolidated metrics report
+      ansible.builtin.set_fact:
+        metrics_report: |
+          ================= Resource Monitoring Report =================
+          Host       : {{ inventory_hostname }}
+          Timestamp  : {{ ansible_date_time.iso8601 }}
+          Uptime     : {{ uptime_output.stdout }}
+
+          --- CPU ---
+          {{ cpu_usage.stdout }}
+
+          --- Memory (MB) ---
+          {{ mem_usage.stdout }}
+
+          --- Disk ---
+          {{ disk_usage.stdout }}
+          =================================================================
+
+    - name: Ensure local report directory exists on control node
+      ansible.builtin.file:
+        path: "{{ local_report_dir }}"
+        state: directory
+        mode: "0750"
+      delegate_to: localhost
+      run_once: false
+
+    - name: Write per-host metrics report to control node (central location)
+      ansible.builtin.copy:
+        content: "{{ metrics_report }}"
+        dest: "{{ local_report_dir }}/{{ inventory_hostname }}_{{ ansible_date_time.date }}.txt"
+        mode: "0640"
+      delegate_to: localhost
+
+    - name: Display metrics summary
+      ansible.builtin.debug:
+        msg: "{{ metrics_report }}"
