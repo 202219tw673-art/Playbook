@@ -1,0 +1,7 @@
+---
+all:
+hosts:
+rhel9-host:
+ansible_host: 192.168.1.13
+Rhel8-host:
+ansible_host: 192.168.1.14
