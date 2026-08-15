@@ -1,0 +1,46 @@
+---
+- name: Resource Monitoring
+  hosts: all
+  gather_facts: no
+
+  tasks:
+
+    - name: CPU Usage
+      shell: top -bn1 | grep "Cpu"
+      register: cpu_output
+
+    - name: Memory Usage
+      shell: free -m
+      register: memory_output
+
+    - name: Disk Usage
+      shell: df -h
+      register: disk_output
+
+    - name: Uptime
+      shell: uptime
+      register: uptime_output
+
+    - name: Show CPU Utilization
+      debug:
+        msg:
+          - "==================== CPU UTILIZATION ===================="
+          - "{{ cpu_output.stdout }}"
+
+    - name: Show Memory Utilization
+      debug:
+        msg:
+          - "================== MEMORY UTILIZATION =================="
+          - "{{ memory_output.stdout }}"
+
+    - name: Show Disk Utilization
+      debug:
+        msg:
+          - "=================== DISK UTILIZATION ==================="
+          - "{{ disk_output.stdout }}"
+
+    - name: Show Uptime Information
+      debug:
+        msg:
+          - "===================== SYSTEM UPTIME ===================="
+          - "{{ uptime_output.stdout }}"
