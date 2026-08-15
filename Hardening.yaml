@@ -402,32 +402,7 @@
         - sa2
       ignore_errors: true
 
-    
-
-    - name: "124 | Ensure audit_backlog_limit is set in GRUB_CMDLINE_LINUX"
-      ansible.builtin.lineinfile:
-        path: /etc/default/grub
-        backrefs: true
-        regexp: '^(GRUB_CMDLINE_LINUX=".*)(")$'
-        line: '\1 audit_backlog_limit={{ hardening_audit_backlog_limit }}\2'
-      when:
-        - hardening_grub_file.stat.exists
-        - "'audit_backlog_limit=' not in lookup('file', '/etc/default/grub')"
-      notify:
-        - rebuild grub config bios
-        - rebuild grub config efi
-
    
-    
-
-    - name: "124/120 | Report grub file not present (manual review needed)"
-      ansible.builtin.debug:
-        msg: >
-          /etc/default/grub was not found on this host — audit_backlog_limit
-          and IPv6-disable grub controls were skipped. Review boot configuration
-          manually if this host uses a non-standard bootloader.
-      when: not hardening_grub_file.stat.exists
-
     # -----------------------------------------------------------------
     # Wireless interfaces disabled
     # -----------------------------------------------------------------
