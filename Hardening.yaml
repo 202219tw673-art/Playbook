@@ -33,8 +33,7 @@
 
     hardening_gdm_banner_enable: false
 
-    hardening_audit_backlog_limit: 8192
-    hardening_disable_ipv6: false
+  
     hardening_disable_wireless: false
 
     hardening_aide_enabled: true
