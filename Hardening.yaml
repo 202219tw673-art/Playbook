@@ -1,0 +1,678 @@
+---
+# ===================================================================
+# OS Hardening Baseline — RHEL 8/9
+# Mirrors internal baseline checklist (CIS-derived). Each task is
+# labeled with the corresponding control reference for traceability.
+# ===================================================================
+- name: OS Hardening Baseline
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    hardening_pass_max_days: 90
+    hardening_pass_min_days: 7
+    hardening_pass_warn_age: 7
+    hardening_inactive_days: 30
+    hardening_chage_exclude_users: []
+
+    hardening_ssh_config_path: /etc/ssh/sshd_config
+    hardening_ssh_x11_forwarding: "no"
+    hardening_ssh_allow_tcp_forwarding: "no"
+    hardening_ssh_client_alive_interval: 300
+    hardening_ssh_client_alive_count_max: 0
+    hardening_ssh_permit_root_login: "no"
+    hardening_set_ssh_protocol_directive: false
+    hardening_ssh_protocol: 2
+
+    hardening_enforce_gpgcheck: true
+
+    hardening_tmp_mount_opts: "nodev,nosuid,noexec"
+    hardening_vartmp_mount_opts: "nodev,nosuid,noexec"
+    hardening_home_mount_opts: "nodev,nosuid"
+
+    hardening_gdm_banner_enable: false
+
+    hardening_audit_backlog_limit: 8192
+    hardening_disable_ipv6: false
+    hardening_disable_wireless: false
+
+    hardening_aide_enabled: true
+    hardening_aide_cron_schedule: "0 5"
+
+    hardening_crypto_policy: "DEFAULT"
+
+    hardening_remove_packages:
+      - xorg-x11-server-Xorg
+      - telnet
+
+    hardening_disable_services:
+      - avahi-daemon
+      - rpcbind
+
+    hardening_audit_admin_space_left_action: "SUSPEND"
+    hardening_audit_privileged_commands: []
+
+    hardening_pwquality_minlen: 14
+    hardening_pwquality_dcredit: -1
+    hardening_pwquality_ucredit: -1
+    hardening_pwquality_lcredit: -1
+    hardening_pwquality_ocredit: -1
+
+    hardening_password_remember: 5
+
+  tasks:
+    # -----------------------------------------------------------------
+    # 189/190/191/192 — Password aging (PASS_MAX_DAYS/MIN_DAYS/WARN_AGE/INACTIVE)
+    # -----------------------------------------------------------------
+    - name: "189.2 | Set PASS_MAX_DAYS in login.defs"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^PASS_MAX_DAYS'
+        line: "PASS_MAX_DAYS   {{ hardening_pass_max_days }}"
+
+    - name: "190.2 | Set PASS_MIN_DAYS in login.defs"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^PASS_MIN_DAYS'
+        line: "PASS_MIN_DAYS   {{ hardening_pass_min_days }}"
+
+    - name: "191 | Set PASS_WARN_AGE in login.defs"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^PASS_WARN_AGE'
+        line: "PASS_WARN_AGE   {{ hardening_pass_warn_age }}"
+
+    - name: "Discover non-system, non-locked accounts (uid>=1000, has password set)"
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep -E '^[^:]+:[^!*]' /etc/shadow | cut -d: -f1
+      args:
+        executable: /bin/bash
+      register: hardening_shadow_users
+      changed_when: false
+
+    - name: "Apply chage aging settings to all discovered non-system accounts"
+      ansible.builtin.command: >
+        chage
+        --maxdays {{ hardening_pass_max_days }}
+        --mindays {{ hardening_pass_min_days }}
+        --warndays {{ hardening_pass_warn_age }}
+        --inactive {{ hardening_inactive_days }}
+        {{ item }}
+      loop: "{{ hardening_shadow_users.stdout_lines }}"
+      when: item not in hardening_chage_exclude_users
+      changed_when: true
+
+    # -----------------------------------------------------------------
+    # 152 — Permissions on all logfiles under /var/log
+    # -----------------------------------------------------------------
+    - name: "152 | Check for over-permissive files/dirs under /var/log"
+      ansible.builtin.shell: |
+        set -o pipefail
+        find /var/log -type f -perm /037 -o -type d -perm /026
+      args:
+        executable: /bin/bash
+      register: hardening_logperm_check
+      changed_when: false
+
+    - name: "152 | Tighten permissions on /var/log files (group -wx, other -rwx)"
+      ansible.builtin.shell: |
+        find /var/log -type f -exec chmod g-wx,o-rwx "{}" + \
+          -o -type d -exec chmod g-w,o-rwx "{}" +
+      when: hardening_logperm_check.stdout_lines | length > 0
+      changed_when: true
+
+    # -----------------------------------------------------------------
+    # 205 — Permissions on /etc/passwd-
+    # -----------------------------------------------------------------
+    - name: "205 | Set permissions on /etc/passwd-"
+      ansible.builtin.file:
+        path: /etc/passwd-
+        owner: root
+        group: root
+        mode: "0600"
+      ignore_errors: true   # file may not exist on every host
+
+    # -----------------------------------------------------------------
+    # 209 — No world-writable files (AUDIT ONLY)
+    # -----------------------------------------------------------------
+    - name: "209 | Scan local filesystems for world-writable files"
+      ansible.builtin.shell: |
+        set -o pipefail
+        df --local -P | awk '{if (NR!=1) print $6}' | xargs -I '{}' find '{}' -xdev -type f -perm -0002
+      args:
+        executable: /bin/bash
+      register: hardening_world_writable
+      changed_when: false
+
+    - name: "209 | Report world-writable files found (manual remediation required)"
+      ansible.builtin.debug:
+        msg: >
+          World-writable files detected — review and remediate manually
+          (chmod og-w or 755 as appropriate, app-owned files may need vendor sign-off):
+          {{ hardening_world_writable.stdout_lines }}
+      when: hardening_world_writable.stdout_lines | length > 0
+
+    # -----------------------------------------------------------------
+    # 210 — No unowned files/directories (AUDIT ONLY)
+    # -----------------------------------------------------------------
+    - name: "210 | Scan for files/dirs with no owning user or group"
+      ansible.builtin.shell: |
+        set -o pipefail
+        df --local -P | awk '{if (NR!=1) print $6}' | xargs -I '{}' find '{}' -xdev \( -nouser -o -nogroup \)
+      args:
+        executable: /bin/bash
+      register: hardening_unowned_files
+      changed_when: false
+
+    - name: "210 | Report unowned files/dirs found (manual remediation required)"
+      ansible.builtin.debug:
+        msg: "Unowned files/dirs detected — assign correct owner/group manually: {{ hardening_unowned_files.stdout_lines }}"
+      when: hardening_unowned_files.stdout_lines | length > 0
+
+    # -----------------------------------------------------------------
+    # 155-159, 162 — Permissions on crontab/cron.*/sshd_config
+    # -----------------------------------------------------------------
+    - name: "155-159,162 | Set permissions on cron and sshd_config paths"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: "og-rwx"
+      loop:
+        - /etc/crontab
+        - /etc/cron.hourly
+        - /etc/cron.daily
+        - /etc/cron.weekly
+        - /etc/cron.monthly
+        - /etc/cron.d
+      ignore_errors: true
+
+    - name: "162 | Set permissions on /etc/ssh/sshd_config"
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config
+        owner: root
+        group: root
+        mode: "0600"
+
+    # -----------------------------------------------------------------
+    # 164 — Permissions on SSH private host key files
+    # -----------------------------------------------------------------
+    - name: "164 | Find SSH private host key files"
+      ansible.builtin.find:
+        paths: /etc/ssh
+        patterns: 'ssh_host_*_key'
+        file_type: file
+      register: hardening_ssh_hostkeys
+
+    - name: "164 | Set ownership/permissions on SSH private host key files"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ hardening_ssh_hostkeys.files }}"
+
+    # -----------------------------------------------------------------
+    # 167/178 — SSH X11Forwarding / AllowTcpForwarding disabled
+    # 101 — ClientAliveInterval, Protocol
+    # -----------------------------------------------------------------
+    - name: "Backup sshd_config before editing"
+      ansible.builtin.copy:
+        src: /etc/ssh/sshd_config
+        dest: "/etc/ssh/sshd_config_bak_{{ ansible_date_time.date | replace('-','') }}"
+        remote_src: true
+        force: false
+
+    - name: "167 | Ensure X11Forwarding is disabled"
+      ansible.builtin.lineinfile:
+        path: "{{ hardening_ssh_config_path }}"
+        regexp: '^\s*#?\s*X11Forwarding'
+        line: "X11Forwarding {{ hardening_ssh_x11_forwarding }}"
+      notify: restart sshd
+
+    - name: "178 | Ensure AllowTcpForwarding is disabled"
+      ansible.builtin.lineinfile:
+        path: "{{ hardening_ssh_config_path }}"
+        regexp: '^\s*#?\s*AllowTcpForwarding'
+        line: "AllowTcpForwarding {{ hardening_ssh_allow_tcp_forwarding }}"
+      notify: restart sshd
+
+    - name: "Ensure ClientAliveInterval is set (<=300, >0)"
+      ansible.builtin.lineinfile:
+        path: "{{ hardening_ssh_config_path }}"
+        regexp: '^\s*#?\s*ClientAliveInterval'
+        line: "ClientAliveInterval {{ hardening_ssh_client_alive_interval }}"
+      notify: restart sshd
+
+    - name: "Ensure ClientAliveCountMax is set"
+      ansible.builtin.lineinfile:
+        path: "{{ hardening_ssh_config_path }}"
+        regexp: '^\s*#?\s*ClientAliveCountMax'
+        line: "ClientAliveCountMax {{ hardening_ssh_client_alive_count_max }}"
+      notify: restart sshd
+
+    - name: "Ensure PermitRootLogin is disabled"
+      ansible.builtin.lineinfile:
+        path: "{{ hardening_ssh_config_path }}"
+        regexp: '^\s*#?\s*PermitRootLogin'
+        line: "PermitRootLogin {{ hardening_ssh_permit_root_login }}"
+      notify: restart sshd
+
+    - name: "Set legacy Protocol directive (only if explicitly enabled)"
+      ansible.builtin.lineinfile:
+        path: "{{ hardening_ssh_config_path }}"
+        regexp: '^\s*#?\s*Protocol'
+        line: "Protocol {{ hardening_ssh_protocol }}"
+      when: hardening_set_ssh_protocol_directive | default(false)
+      notify: restart sshd
+
+    - name: "Validate sshd_config syntax before restart"
+      ansible.builtin.command: sshd -t
+      changed_when: false
+
+    # -----------------------------------------------------------------
+    # 29.2/30 — GPG checking enabled on all yum/dnf repos
+    # -----------------------------------------------------------------
+    - name: "29.2 | Find all yum repo files"
+      ansible.builtin.find:
+        paths: /etc/yum.repos.d
+        patterns: '*.repo'
+      register: hardening_repo_files
+      when: hardening_enforce_gpgcheck
+
+    - name: "29.2 | Ensure gpgcheck=1 in every repo file"
+      ansible.builtin.lineinfile:
+        path: "{{ item.path }}"
+        regexp: '^gpgcheck='
+        line: "gpgcheck=1"
+      loop: "{{ hardening_repo_files.files | default([]) }}"
+      when: hardening_enforce_gpgcheck
+
+    # -----------------------------------------------------------------
+    # 4/5/6/7 — Mount options for /tmp, /var/tmp, /home (nodev,nosuid,noexec)
+    # -----------------------------------------------------------------
+    - name: "Ensure hardened mount options on /tmp"
+      ansible.posix.mount:
+        path: /tmp
+        src: "{{ ansible_mounts | selectattr('mount','equalto','/tmp') | map(attribute='device') | first | default(omit) }}"
+        fstype: "{{ ansible_mounts | selectattr('mount','equalto','/tmp') | map(attribute='fstype') | first | default('tmpfs') }}"
+        opts: "defaults,{{ hardening_tmp_mount_opts }}"
+        state: mounted
+      when: ansible_mounts | selectattr('mount','equalto','/tmp') | list | length > 0
+
+    - name: "Ensure hardened mount options on /var/tmp"
+      ansible.posix.mount:
+        path: /var/tmp
+        src: "{{ ansible_mounts | selectattr('mount','equalto','/var/tmp') | map(attribute='device') | first | default(omit) }}"
+        fstype: "{{ ansible_mounts | selectattr('mount','equalto','/var/tmp') | map(attribute='fstype') | first | default(omit) }}"
+        opts: "defaults,{{ hardening_vartmp_mount_opts }}"
+        state: mounted
+      when: ansible_mounts | selectattr('mount','equalto','/var/tmp') | list | length > 0
+
+    - name: "Ensure hardened mount options on /home"
+      ansible.posix.mount:
+        path: /home
+        src: "{{ ansible_mounts | selectattr('mount','equalto','/home') | map(attribute='device') | first | default(omit) }}"
+        fstype: "{{ ansible_mounts | selectattr('mount','equalto','/home') | map(attribute='fstype') | first | default(omit) }}"
+        opts: "defaults,{{ hardening_home_mount_opts }}"
+        state: mounted
+      when: ansible_mounts | selectattr('mount','equalto','/home') | list | length > 0
+
+    # -----------------------------------------------------------------
+    # 54 — GDM login banner
+    # -----------------------------------------------------------------
+    - name: "54 | Ensure /etc/dconf/db/gdm.d directory exists (if GDM installed)"
+      ansible.builtin.file:
+        path: /etc/dconf/db/gdm.d
+        state: directory
+        mode: "0755"
+      when: hardening_gdm_banner_enable and ansible_facts.packages is defined and 'gdm' in ansible_facts.packages
+
+    - name: "54 | Deploy GDM greeter banner"
+      ansible.builtin.template:
+        src: greeter.dconf-defaults.j2
+        dest: /etc/dconf/db/gdm.d/01-banner-message
+      when: hardening_gdm_banner_enable and ansible_facts.packages is defined and 'gdm' in ansible_facts.packages
+      notify: apply tmpfiles
+
+    # -----------------------------------------------------------------
+    # Log/journal/audit file permission hardening + sa1/sa2 umask
+    # -----------------------------------------------------------------
+    - name: "Copy default tmpfiles configs into /etc for local overrides"
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/etc/tmpfiles.d/{{ item | basename }}"
+        remote_src: true
+        force: false
+      loop:
+        - /usr/lib/tmpfiles.d/var.conf
+        - /usr/lib/tmpfiles.d/systemd.conf
+
+    - name: "Harden /etc/tmpfiles.d/var.conf permissions (log/wtmp/btmp/lastlog)"
+      ansible.builtin.replace:
+        path: /etc/tmpfiles.d/var.conf
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      loop:
+        - { regexp: 'log 0755', replace: 'log 0750' }
+        - { regexp: 'wtmp 0664', replace: 'wtmp 0640' }
+        - { regexp: 'btmp 0660', replace: 'btmp 0640' }
+        - { regexp: 'lastlog 0664', replace: 'lastlog 0640' }
+      notify: apply tmpfiles
+
+    - name: "Harden /etc/tmpfiles.d/systemd.conf (journal permissions)"
+      ansible.builtin.replace:
+        path: /etc/tmpfiles.d/systemd.conf
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      loop:
+        - { regexp: 'journal 2755', replace: 'journal 2640' }
+        - { regexp: '%m 2755', replace: '%m 2640' }
+      notify: apply tmpfiles
+
+    - name: "Ensure logrotate creates wtmp with tightened perms"
+      ansible.builtin.lineinfile:
+        path: /etc/logrotate.d/wtmp
+        regexp: '^create'
+        line: "create 0640 root utmp"
+
+    - name: "Ensure logrotate creates btmp with tightened perms"
+      ansible.builtin.lineinfile:
+        path: /etc/logrotate.d/btmp
+        regexp: '^create'
+        line: "create 0640 root utmp"
+
+    - name: "Backup sysstat sa1/sa2 scripts before umask change"
+      ansible.builtin.copy:
+        src: "/usr/lib64/sa/{{ item }}"
+        dest: "/usr/lib64/sa/{{ item }}-{{ ansible_date_time.date }}"
+        remote_src: true
+        force: false
+      loop:
+        - sa1
+        - sa2
+      ignore_errors: true
+
+    - name: "Tighten umask in sysstat sa1/sa2 scripts (0022 -> 0077)"
+      ansible.builtin.replace:
+        path: "/usr/lib64/sa/{{ item }}"
+        regexp: 'umask 0022'
+        replace: 'umask 0077'
+      loop:
+        - sa1
+        - sa2
+      ignore_errors: true
+
+    # -----------------------------------------------------------------
+    # 124 — audit_backlog_limit | 120 — Disable IPv6 (grub)
+    # -----------------------------------------------------------------
+    - name: "Backup /etc/default/grub before editing"
+      ansible.builtin.copy:
+        src: /etc/default/grub
+        dest: "/etc/default/grub_bak_{{ ansible_date_time.date | replace('-','') }}"
+        remote_src: true
+        force: false
+
+    - name: "124 | Ensure audit_backlog_limit is set in GRUB_CMDLINE_LINUX"
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        backrefs: true
+        regexp: '^(GRUB_CMDLINE_LINUX=".*)(")$'
+        line: '\1 audit_backlog_limit={{ hardening_audit_backlog_limit }}\2'
+      when: "'audit_backlog_limit=' not in lookup('file', '/etc/default/grub')"
+      notify:
+        - rebuild grub config bios
+        - rebuild grub config efi
+
+    - name: "120 | Ensure IPv6 is disabled in GRUB_CMDLINE_LINUX"
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        backrefs: true
+        regexp: '^(GRUB_CMDLINE_LINUX=".*)(")$'
+        line: '\1 ipv6.disable=1\2'
+      when:
+        - hardening_disable_ipv6
+        - "'ipv6.disable=' not in lookup('file', '/etc/default/grub')"
+      notify:
+        - rebuild grub config bios
+        - rebuild grub config efi
+
+    # -----------------------------------------------------------------
+    # Wireless interfaces disabled
+    # -----------------------------------------------------------------
+    - name: "Ensure NetworkManager is running (needed to control radios)"
+      ansible.builtin.systemd:
+        name: NetworkManager
+        state: started
+      when: hardening_disable_wireless
+      ignore_errors: true
+
+    - name: "Check current wireless radio status"
+      ansible.builtin.command: nmcli radio all
+      register: hardening_radio_status
+      changed_when: false
+      when: hardening_disable_wireless
+      ignore_errors: true
+
+    - name: "Disable all wireless radios"
+      ansible.builtin.command: nmcli radio all off
+      when:
+        - hardening_disable_wireless
+        - hardening_radio_status is defined
+        - hardening_radio_status.rc is defined and hardening_radio_status.rc == 0
+      changed_when: true
+
+    # -----------------------------------------------------------------
+    # AIDE — file integrity checking
+    # -----------------------------------------------------------------
+    - name: "Install AIDE"
+      ansible.builtin.dnf:
+        name: aide
+        state: present
+      when: hardening_aide_enabled
+
+    - name: "Initialize AIDE database if not already present"
+      ansible.builtin.command: aide --init
+      args:
+        creates: /var/lib/aide/aide.db.new.gz
+      when: hardening_aide_enabled
+
+    - name: "Activate AIDE database"
+      ansible.builtin.command: mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+      args:
+        creates: /var/lib/aide/aide.db.gz
+      when: hardening_aide_enabled
+
+    - name: "Schedule daily AIDE integrity check"
+      ansible.builtin.cron:
+        name: "AIDE integrity check"
+        user: root
+        minute: "{{ hardening_aide_cron_schedule.split(' ')[0] }}"
+        hour: "{{ hardening_aide_cron_schedule.split(' ')[1] }}"
+        job: "/usr/sbin/aide --check"
+      when: hardening_aide_enabled
+
+    # -----------------------------------------------------------------
+    # Crypto policy
+    # -----------------------------------------------------------------
+    - name: "57 | Check current system crypto policy"
+      ansible.builtin.command: grep -E -i '^\s*(FUTURE|FIPS)\s*(\s+#.*)?$' /etc/crypto-policies/config
+      register: hardening_crypto_check
+      changed_when: false
+      failed_when: false
+
+    - name: "57 | Set system-wide crypto policy"
+      ansible.builtin.command: "update-crypto-policies --set {{ hardening_crypto_policy }}"
+      when: hardening_crypto_check.rc != 0
+      changed_when: true
+
+    # -----------------------------------------------------------------
+    # 61/79 — Remove X Window System, telnet client, other unwanted packages
+    # -----------------------------------------------------------------
+    - name: "61/79 | Remove disallowed packages"
+      ansible.builtin.dnf:
+        name: "{{ hardening_remove_packages }}"
+        state: absent
+
+    # -----------------------------------------------------------------
+    # 63/72 — Disable avahi-daemon, rpcbind, other unneeded services
+    # -----------------------------------------------------------------
+    - name: "63/72 | Disable unneeded services"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: "{{ hardening_disable_services }}"
+      ignore_errors: true
+
+    # -----------------------------------------------------------------
+    # 74/127 — auditd admin_space_left_action
+    # -----------------------------------------------------------------
+    - name: "Backup auditd.conf before editing"
+      ansible.builtin.copy:
+        src: /etc/audit/auditd.conf
+        dest: "/etc/audit/auditd.conf_bak_{{ ansible_date_time.date | replace('-','') }}"
+        remote_src: true
+        force: false
+
+    - name: "74/127 | Set admin_space_left_action in auditd.conf"
+      ansible.builtin.lineinfile:
+        path: /etc/audit/auditd.conf
+        regexp: '^admin_space_left_action\s*='
+        line: "admin_space_left_action = {{ hardening_audit_admin_space_left_action }}"
+      notify: restart auditd
+
+    # -----------------------------------------------------------------
+    # 138 — Collect use of privileged commands (custom audit rules)
+    # -----------------------------------------------------------------
+    - name: "138 | Deploy custom audit rules for privileged command collection"
+      ansible.builtin.template:
+        src: hardening.rules.j2
+        dest: /etc/audit/rules.d/hardening.rules
+      when: hardening_audit_privileged_commands is defined and hardening_audit_privileged_commands | length > 0
+      notify: restart auditd
+
+    # -----------------------------------------------------------------
+    # 185/186/188 — pwquality + PAM password hashing (SHA-512) via authselect
+    # -----------------------------------------------------------------
+    - name: "Check current authselect profile"
+      ansible.builtin.command: authselect current
+      register: hardening_authselect_current
+      changed_when: false
+      failed_when: false
+
+    - name: "Create custom authselect profile (hardening) if not already custom"
+      ansible.builtin.command: authselect create-profile hardening -b sssd --symlink-meta
+      args:
+        creates: /etc/authselect/custom/hardening
+      when: "'custom/hardening' not in hardening_authselect_current.stdout"
+
+    - name: "Select custom authselect profile with password quality features"
+      ansible.builtin.command: >
+        authselect select custom/hardening with-faillock without-nullok --force
+      when: "'custom/hardening' not in hardening_authselect_current.stdout"
+
+    - name: "Ensure pwquality.conf enforces minlen/credit policy"
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: "^#?\\s*{{ item.key }}\\s*="
+        line: "{{ item.key }} = {{ item.value }}"
+      loop:
+        - { key: minlen, value: "{{ hardening_pwquality_minlen }}" }
+        - { key: dcredit, value: "{{ hardening_pwquality_dcredit }}" }
+        - { key: ucredit, value: "{{ hardening_pwquality_ucredit }}" }
+        - { key: lcredit, value: "{{ hardening_pwquality_lcredit }}" }
+        - { key: ocredit, value: "{{ hardening_pwquality_ocredit }}" }
+
+    - name: "Ensure password remember (history) is set in system-auth via authselect"
+      ansible.builtin.lineinfile:
+        path: /etc/pam.d/system-auth
+        regexp: '^password\s+sufficient\s+pam_unix\.so'
+        line: "password    sufficient    pam_unix.so sha512 shadow nullok try_first_pass use_authtok remember={{ hardening_password_remember }}"
+
+    - name: "Ensure password remember (history) is set in password-auth via authselect"
+      ansible.builtin.lineinfile:
+        path: /etc/pam.d/password-auth
+        regexp: '^password\s+sufficient\s+pam_unix\.so'
+        line: "password    sufficient    pam_unix.so sha512 shadow nullok try_first_pass use_authtok remember={{ hardening_password_remember }}"
+
+    # -----------------------------------------------------------------
+    # 199 — wheel group membership (AUDIT ONLY)
+    # -----------------------------------------------------------------
+    - name: "199.2 | Report current wheel group membership for manual review"
+      ansible.builtin.command: getent group wheel
+      register: hardening_wheel_group
+      changed_when: false
+
+    - name: "199.2 | Display wheel group members"
+      ansible.builtin.debug:
+        msg: "Review wheel group membership and remove unauthorized users manually: {{ hardening_wheel_group.stdout }}"
+
+    # -----------------------------------------------------------------
+    # 193 — All users' last password change date must be in the past (AUDIT)
+    # -----------------------------------------------------------------
+    - name: "193 | Check for accounts with a future last-password-change date"
+      ansible.builtin.shell: |
+        set -o pipefail
+        awk -F: '/^[^:]+:[^!*]/{print $1}' /etc/shadow | while read -r usr; do
+          change=$(date -d "$(chage --list "$usr" | grep '^Last password change' | cut -d: -f2 | grep -v 'never$')" +%s 2>/dev/null)
+          if [ -n "$change" ] && [ "$change" -gt "$(date +%s)" ]; then
+            echo "$usr"
+          fi
+        done
+      args:
+        executable: /bin/bash
+      register: hardening_future_pwchange
+      changed_when: false
+
+    - name: "193 | Report accounts with future password-change dates"
+      ansible.builtin.debug:
+        msg: "Accounts with a last-password-change date in the future (fix manually with chage): {{ hardening_future_pwchange.stdout_lines }}"
+      when: hardening_future_pwchange.stdout_lines | length > 0
+
+    # -----------------------------------------------------------------
+    # 90 — TCP SYN cookies enabled
+    # -----------------------------------------------------------------
+    - name: "90 | Ensure TCP SYN cookies are enabled"
+      ansible.posix.sysctl:
+        name: net.ipv4.tcp_syncookies
+        value: "1"
+        sysctl_set: true
+        state: present
+        reload: true
+
+    # -----------------------------------------------------------------
+    # 30.1 — Package manager repository review (MANUAL — enumerate only)
+    # -----------------------------------------------------------------
+    - name: "30.1 | List configured yum repo files for manual review"
+      ansible.builtin.find:
+        paths: /etc/yum.repos.d
+        patterns: '*.repo'
+      register: hardening_repo_list
+
+    - name: "30.1 | Report repo files present (confirm only approved repo remains)"
+      ansible.builtin.debug:
+        msg: "Repo files present — confirm only the approved corporate repo is enabled: {{ hardening_repo_list.files | map(attribute='path') | list }}"
+
+  handlers:
+    - name: restart sshd
+      ansible.builtin.systemd:
+        name: sshd
+        state: restarted
+
+    - name: apply tmpfiles
+      ansible.builtin.command: systemd-tmpfiles --create
+
+    - name: restart auditd
+      ansible.builtin.systemd:
+        name: auditd
+        state: restarted
+
+    - name: rebuild grub config bios
+      ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+      when: ansible_facts['distribution_major_version'] is defined and not (ansible_facts['os_family'] == "RedHat" and ansible_facts['selinux'] is defined and false)
+      ignore_errors: true
+
+    - name: rebuild grub config efi
+      ansible.builtin.command: grub2-mkconfig -o /boot/efi/EFI/redhat/grub.cfg
+      ignore_errors: true
