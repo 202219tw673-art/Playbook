@@ -403,21 +403,7 @@
         - sa2
       ignore_errors: true
 
-    # -----------------------------------------------------------------
-    # 124 — audit_backlog_limit | 120 — Disable IPv6 (grub)
-    # -----------------------------------------------------------------
-    - name: "Check whether /etc/default/grub exists on this host"
-      ansible.builtin.stat:
-        path: /etc/default/grub
-      register: hardening_grub_file
-
-    - name: "Backup /etc/default/grub before editing"
-      ansible.builtin.copy:
-        src: /etc/default/grub
-        dest: "/etc/default/grub_bak_{{ ansible_date_time.date | replace('-','') }}"
-        remote_src: true
-        force: false
-      when: hardening_grub_file.stat.exists
+    
 
     - name: "124 | Ensure audit_backlog_limit is set in GRUB_CMDLINE_LINUX"
       ansible.builtin.lineinfile:
@@ -432,19 +418,8 @@
         - rebuild grub config bios
         - rebuild grub config efi
 
-    - name: "120 | Ensure IPv6 is disabled in GRUB_CMDLINE_LINUX"
-      ansible.builtin.lineinfile:
-        path: /etc/default/grub
-        backrefs: true
-        regexp: '^(GRUB_CMDLINE_LINUX=".*)(")$'
-        line: '\1 ipv6.disable=1\2'
-      when:
-        - hardening_grub_file.stat.exists
-        - hardening_disable_ipv6
-        - "'ipv6.disable=' not in lookup('file', '/etc/default/grub')"
-      notify:
-        - rebuild grub config bios
-        - rebuild grub config efi
+   
+    
 
     - name: "124/120 | Report grub file not present (manual review needed)"
       ansible.builtin.debug:
