@@ -10,9 +10,12 @@
   become: true
   gather_facts: true
 
-  vars:
-    patch_log_dir: /var/log/ansible_patching
-    patch_log_file: "{{ patch_log_dir }}/patch_run_{{ ansible_date_time.iso8601_basic_short }}.log"
+vars:
+  patch_log_dir: /var/log/ansible_patching
+  patch_log_file: "{{ patch_log_dir }}/patch_run_{{ ansible_date_time.iso8601_basic_short }}.log"
+  patch_exclude_packages: []          # list of package names/globs to skip, e.g. ["kernel*"]
+  patch_reboot_if_required: false     # set true to allow automatic reboot
+  
 
   tasks:
 
@@ -46,7 +49,7 @@
       ansible.builtin.yum:
         name: "*"
         state: latest
-        exclude: "{{ patch_exclude_packages | join(',') if patch_exclude_packages else omit }}"
+        exclude: "{{ patch_exclude_packages | default([]) | join(',') if patch_exclude_packages | default([]) | length > 0 else omit }}"
         update_cache: true
       register: patch_result
 
@@ -79,6 +82,14 @@
         - reboot_required
         - patch_reboot_if_required | bool
 
+    - name: Reboot server if required and permitted
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+        msg: "Rebooting for OS patch completion (Ansible-managed)"
+      when:
+        - reboot_required
+        - patch_reboot_if_required | default(false) | bool
+
     - name: Report reboot-pending status if reboot not permitted
       ansible.builtin.debug:
         msg: >
@@ -87,7 +98,7 @@
           Please schedule a maintenance-window reboot.
       when:
         - reboot_required
-        - not (patch_reboot_if_required | bool)
+        - not (patch_reboot_if_required | default(false) | bool)
 
     - name: Record patching summary
       ansible.builtin.debug:
