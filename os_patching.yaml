@@ -44,6 +44,8 @@
         exclude: "{{ patch_exclude_packages | default([]) | join(',') if patch_exclude_packages | default([]) | length > 0 else omit }}"
         update_cache: true
       register: patch_result
+      async: 2700   # allow up to 45 minutes for large/GUI-inclusive systems
+      poll: 15      # check status every 15 seconds, printing progress
     - name: Write patch execution log
       ansible.builtin.copy:
         content: |
