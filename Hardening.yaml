@@ -103,25 +103,7 @@
       when: item not in hardening_chage_exclude_users
       changed_when: true
 
-    # -----------------------------------------------------------------
-    # 152 — Permissions on all logfiles under /var/log
-    # -----------------------------------------------------------------
-    - name: "152 | Check for over-permissive files/dirs under /var/log"
-      ansible.builtin.shell: |
-        set -o pipefail
-        find /var/log -type f -perm /037 -o -type d -perm /026
-      args:
-        executable: /bin/bash
-      register: hardening_logperm_check
-      changed_when: false
-
-    - name: "152 | Tighten permissions on /var/log files (group -wx, other -rwx)"
-      ansible.builtin.shell: |
-        find /var/log -type f -exec chmod g-wx,o-rwx "{}" + \
-          -o -type d -exec chmod g-w,o-rwx "{}" +
-      when: hardening_logperm_check.stdout_lines | length > 0
-      changed_when: true
-
+    
     # -----------------------------------------------------------------
     # 205 — Permissions on /etc/passwd-
     # -----------------------------------------------------------------
