@@ -115,42 +115,12 @@
         mode: "0600"
       ignore_errors: true   # file may not exist on every host
 
-    # -----------------------------------------------------------------
-    # 209 — No world-writable files (AUDIT ONLY)
-    # -----------------------------------------------------------------
-    - name: "209 | Scan local filesystems for world-writable files"
-      ansible.builtin.shell: |
-        set -o pipefail
-        df --local -P | awk '{if (NR!=1) print $6}' | xargs -I '{}' find '{}' -xdev -type f -perm -0002
-      args:
-        executable: /bin/bash
-      register: hardening_world_writable
-      changed_when: false
-
-    - name: "209 | Report world-writable files found (manual remediation required)"
-      ansible.builtin.debug:
-        msg: >
-          World-writable files detected — review and remediate manually
-          (chmod og-w or 755 as appropriate, app-owned files may need vendor sign-off):
-          {{ hardening_world_writable.stdout_lines }}
-      when: hardening_world_writable.stdout_lines | length > 0
+   
 
     # -----------------------------------------------------------------
     # 210 — No unowned files/directories (AUDIT ONLY)
     # -----------------------------------------------------------------
-    - name: "210 | Scan for files/dirs with no owning user or group"
-      ansible.builtin.shell: |
-        set -o pipefail
-        df --local -P | awk '{if (NR!=1) print $6}' | xargs -I '{}' find '{}' -xdev \( -nouser -o -nogroup \)
-      args:
-        executable: /bin/bash
-      register: hardening_unowned_files
-      changed_when: false
-
-    - name: "210 | Report unowned files/dirs found (manual remediation required)"
-      ansible.builtin.debug:
-        msg: "Unowned files/dirs detected — assign correct owner/group manually: {{ hardening_unowned_files.stdout_lines }}"
-      when: hardening_unowned_files.stdout_lines | length > 0
+    - 
 
     # -----------------------------------------------------------------
     # 155-159, 162 — Permissions on crontab/cron.*/sshd_config
