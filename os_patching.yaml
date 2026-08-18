@@ -14,10 +14,6 @@
   tasks:
     - name: Update package cache
       yum:
-        update_cache: yes
-
-    - name: Install security and bug-fix updates
-      yum:
         name: '*'
         state: latest
 
