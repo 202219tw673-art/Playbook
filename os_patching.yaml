@@ -5,73 +5,32 @@
 #            using yum. Idempotent and safe to re-run; retains execution
 #            logs for audit purposes; optional controlled reboot.
 # ---------------------------------------------------------------------------
-- name: OS Patching - Secure Update Management
+
+     ---
+- name: OS Patching
   hosts: all
-  become: true
-  gather_facts: true
-  vars:
-    patch_log_dir: /var/log/ansible_patching
-    patch_log_file: "{{ patch_log_dir }}/patch_run_{{ ansible_date_time.iso8601_basic_short }}.log"
-    patch_exclude_packages: []          # list of package names/globs to skip, e.g. ["kernel*"]
-    patch_reboot_if_required: false     # set true to allow automatic reboot
+  become: yes
+
   tasks:
-    
-      # yum check-update returns rc=100 when updates ARE available - not a failure
-    - name: Record pre-patch package list (for rollback reference)
-      ansible.builtin.command:
-        cmd: rpm -qa
-      register: pre_patch_packages
-      changed_when: false
-    - name: Save pre-patch package snapshot to log
-      ansible.builtin.copy:
-        content: "{{ pre_patch_packages.stdout }}"
-        dest: "{{ patch_log_dir }}/pre_patch_packages_{{ ansible_date_time.iso8601_basic_short }}.txt"
-        mode: "0640"
-    - name: Apply all available security and OS updates
-      ansible.builtin.yum:
-        name: "*"
+    - name: Update package cache
+      yum:
+        update_cache: yes
+
+    - name: Install security and bug-fix updates
+      yum:
+        name: '*'
         state: latest
-        exclude: "{{ patch_exclude_packages | default([]) | join(',') if patch_exclude_packages | default([]) | length > 0 else omit }}"
-        update_cache: true
-      register: patch_result
-      async: 2700   # allow up to 45 minutes for large/GUI-inclusive systems
-      poll: 15      # check status every 15 seconds, printing progress
-    - name: Write patch execution log
-      ansible.builtin.copy:
-        content: |
-          Host: {{ inventory_hostname }}
-          Timestamp: {{ ansible_date_time.iso8601 }}
-          Changed: {{ patch_result.changed }}
-          Result: {{ patch_result.msg | default('completed') }}
-        dest: "{{ patch_log_file }}"
-        mode: "0640"
-    - name: Check if a reboot is required (RHEL/CentOS)
-      ansible.builtin.command:
-        cmd: needs-restarting -r
+
+    - name: Check if reboot is required
+      command: needs-restarting -r
       register: reboot_check
-      changed_when: false
-      failed_when: false
-    - name: Set fact - reboot required
-      ansible.builtin.set_fact:
-        reboot_required: "{{ reboot_check.rc == 1 }}"
-    - name: Reboot server if required and permitted
-      ansible.builtin.reboot:
-        reboot_timeout: 600
-        msg: "Rebooting for OS patch completion (Ansible-managed)"
-      when:
-        - reboot_required
-        - patch_reboot_if_required | default(false) | bool
-    - name: Report reboot-pending status if reboot not permitted
-      ansible.builtin.debug:
-        msg: >
-          WARNING: {{ inventory_hostname }} requires a reboot to complete
-          patching, but patch_reboot_if_required is set to false.
-          Please schedule a maintenance-window reboot.
-      when:
-        - reboot_required
-        - not (patch_reboot_if_required | default(false) | bool)
-    - name: Record patching summary
-      ansible.builtin.debug:
-        msg: >
-          Patching on {{ inventory_hostname }} - Changed: {{ patch_result.changed }},
-          RebootRequired: {{ reboot_required }}
+      ignore_errors: yes
+
+    - name: Reboot server if required
+      reboot:
+        reboot_timeout: 1800
+      when: reboot_check.rc != 0
+
+    - name: Verify server availability
+      ping:
+``
