@@ -15,17 +15,7 @@
     patch_exclude_packages: []          # list of package names/globs to skip, e.g. ["kernel*"]
     patch_reboot_if_required: false     # set true to allow automatic reboot
   tasks:
-    - name: Ensure patch log directory exists
-      ansible.builtin.file:
-        path: "{{ patch_log_dir }}"
-        state: directory
-        mode: "0750"
-    - name: Check for available updates (dry run, non-destructive)
-      ansible.builtin.command:
-        cmd: yum check-update
-      register: available_updates
-      changed_when: false
-      failed_when: available_updates.rc not in [0, 100]
+    
       # yum check-update returns rc=100 when updates ARE available - not a failure
     - name: Record pre-patch package list (for rollback reference)
       ansible.builtin.command:
